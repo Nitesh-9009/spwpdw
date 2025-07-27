@@ -1,0 +1,152 @@
+import streamlit as st
+import numpy as np
+import pandas as pd
+import pickle
+from tensorflow.keras.models import load_model
+import plotly.graph_objs as go
+import datetime
+import yfinance as yf
+
+# --------- Function to predict next 365 days ----------
+def predict_next_10_days(stock):
+    try:
+        model = load_model(f"src/trained_model_{stock}.h5")
+        scaler = pickle.load(open(f"src/scaler_{stock}.pkl", 'rb'))
+        last_100 = np.load(f'src/last_100_input_{stock}.npy')  # shape (100, 1)
+    except FileNotFoundError as e:
+        st.error(f"Missing file for {stock}: {e}")
+        return None, None
+
+    last_100_scaled = scaler.transform(last_100)
+    temp_input = list(last_100_scaled)
+    future_predictions = []
+
+    for _ in range(10):
+        input_seq = np.array(temp_input[-5:]).reshape(1, 5, 1)
+        pred = model.predict(input_seq, verbose=0)
+        future_predictions.append(pred[0, 0])
+        temp_input.append([pred[0, 0]])
+
+    predicted_prices = scaler.inverse_transform(np.array(future_predictions).reshape(-1, 1))
+    return predicted_prices.flatten(), last_100[-1][0]  # Also return last known price
+# ---------------- STREAMLIT UI ------------------
+
+st.set_page_config(page_title="Stock Forecast", layout="centered")
+st.title("📈 Next 10 Days Stock Price Forecast")
+
+stocks = ['RELIANCE', 'HDFCBANK', 'TCS']
+selected_stock = st.selectbox("Select a Stock", stocks)
+
+if selected_stock:
+    forecast_prices, last_known_price = predict_next_10_days(selected_stock)
+
+    if forecast_prices is not None:
+        # Prepare forecast dates
+        today = datetime.date.today()
+        forecast_dates = [today + datetime.timedelta(days=i+1) for i in range(10)]
+
+        # Plot forecast
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=forecast_dates, y=forecast_prices,
+                                 mode='lines',
+                                 name='Predicted Price',
+                                 line=dict(color='green')))
+        fig.update_layout(
+            title=f"Predicted Closing Prices for {selected_stock} (Next 30 days)",
+            xaxis_title="Date",
+            yaxis_title="Price (INR)",
+            template="plotly_white"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Date selector
+        selected_date = st.date_input(
+            "Select a date to view predicted price",
+            min_value=forecast_dates[0],
+            max_value=forecast_dates[-1]
+        )
+
+        # Show prediction on selected date
+        if selected_date in forecast_dates:
+            index = forecast_dates.index(selected_date)
+            predicted_price = forecast_prices[index]
+            st.success(f"📅 On {selected_date}, predicted closing price for **{selected_stock}** is **₹{predicted_price:.2f}**.")
+        else:
+            st.warning("Please select a date within the forecast range.")
+
+# ---------------- ADDITIONAL COMPANY INFO SECTION ------------------
+
+st.header("📊 Company Overview & Financials")
+
+if selected_stock:
+    ticker_map = {
+        'RELIANCE': 'RELIANCE.NS',
+        'HDFCBANK': 'HDFCBANK.NS',
+        'TCS': 'TCS.NS'
+    }
+    yf_ticker = ticker_map.get(selected_stock)
+
+    if yf_ticker:
+        try:
+            ticker_obj = yf.Ticker(yf_ticker)
+            stock_info = ticker_obj.info
+
+            # Description
+            st.subheader("🏢 Company Description")
+            st.write(stock_info.get("longBusinessSummary", "No description available."))
+
+            # Key Financial Ratios
+            st.subheader("📈 Key Financial Metrics")
+            col1, col2 = st.columns(2)
+            with col1:
+                market_cap = stock_info.get('marketCap')
+                if market_cap:
+                    st.metric("Market Cap", f"₹{market_cap / 1e12:.2f} T")
+                st.metric("P/E Ratio (TTM)", stock_info.get("trailingPE", "N/A"))
+                st.metric("EPS (TTM)", stock_info.get("trailingEps", "N/A"))
+
+            with col2:
+                roe = stock_info.get("returnOnEquity")
+                st.metric("Return on Equity (%)", f"{roe * 100:.2f}" if roe else "N/A")
+                dy = stock_info.get("dividendYield")
+                st.metric("Dividend Yield (%)", f"{dy * 100:.2f}" if dy else "N/A")
+                high52 = stock_info.get("fiftyTwoWeekHigh")
+                st.metric("52-Week High", f"₹{high52:.2f}" if high52 else "N/A")
+
+            # Add time range selection
+            st.subheader("📉 Historical Stock Price")
+            time_options = {
+                "1 Month": "1mo",
+                "3 Months": "3mo",
+                "6 Months": "6mo",
+                "1 Year": "1y",
+                "2 Years": "2y",
+                "5 Years": "5y",
+                "Max": "max"
+            }
+            selected_period_label = st.selectbox("Select Time Period", list(time_options.keys()))
+            selected_period = time_options[selected_period_label]
+
+            # Fetch and plot historical data
+            hist = ticker_obj.history(period=selected_period)
+            if not hist.empty:
+                hist.reset_index(inplace=True)
+                fig2 = go.Figure()
+                fig2.add_trace(go.Scatter(
+                    x=hist['Date'], y=hist['Close'],
+                    mode='lines+markers',
+                    name='Closing Price',
+                    line=dict(color='royalblue')
+                ))
+                fig2.update_layout(
+                    title=f"{selected_stock} - Closing Prices ({selected_period_label})",
+                    xaxis_title="Date",
+                    yaxis_title="Price (INR)",
+                    template="plotly_white"
+                )
+                st.plotly_chart(fig2, use_container_width=True)
+            else:
+                st.warning("⚠️ No historical data available for selected time range.")
+
+        except Exception as e:
+            st.error(f"An error occurred while fetching data: {e}")
